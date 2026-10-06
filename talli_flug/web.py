@@ -8,6 +8,7 @@ import re
 from urllib.parse import urlsplit
 
 from .state import AircraftStore
+from .metadata import MetadataLookup, LocalAircraftMetadata, enrich_rows
 
 
 def cell(value) -> str:
@@ -18,11 +19,27 @@ def cell(value) -> str:
     return escape(str(value))
 
 
-def render(rows: list[dict], receiver_id: str, connected: bool) -> str:
+def metadata_notice(source: dict | None) -> str:
+    if not source:
+        return "<p>External aircraft metadata: no local database loaded.</p>"
+
+    def link(text, url):
+        if urlsplit(url).scheme not in ("http", "https"):
+            return cell(text)
+        return f'<a href="{escape(url, quote=True)}">{cell(text)}</a>'
+
+    return (f'<p>External aircraft metadata from {link(source["name"], source["url"])}, '
+            f'available under {link(source["license"], source["license_url"])}. '
+            f'Snapshot downloaded: {cell(source["downloaded_at"])}. '
+            'These database records are not receiver observations and may be outdated.</p>')
+
+
+def render(rows: list[dict], receiver_id: str, connected: bool, metadata_source=None) -> str:
     body = []
     for row in rows:
         ground = row["on_ground"]
-        values = [row["icao"], row["df"], row["callsign"],
+        metadata = row.get("external_metadata", {})
+        values = [row["icao"], metadata.get("registration"), metadata.get("type_designator"), row["df"], row["callsign"],
                   None if ground is None else "Ground" if ground else "Airborne",
                   row["latitude"], row["longitude"], row["altitude"], row["selected_altitude"], row["speed"],
                   row["track"], row["vertical_rate"],
@@ -32,8 +49,8 @@ def render(rows: list[dict], receiver_id: str, connected: bool) -> str:
         link = f'<a href="/aircraft/{escape(row["icao"], quote=True)}">{cell(row["icao"])}</a>'
         body.append("<tr><td>" + link + "</td>" + "".join(f"<td>{cell(value)}</td>" for value in values[1:]) + "</tr>")
     if not body:
-        body.append('<tr><td colspan="15">No current aircraft.</td></tr>')
-    headings = ["ICAO", "Latest DF", "Callsign", "State", "Latitude", "Longitude",
+        body.append('<tr><td colspan="17">No current aircraft.</td></tr>')
+    headings = ["ICAO", "Registration", "Type", "Latest DF", "Callsign", "State", "Latitude", "Longitude",
                 "Baro altitude (ft)", "Selected altitude (ft)", "Ground speed (kt)", "Track (°)",
                 "Vertical rate (ft/min)", "Last seen (UTC)", "Latest receiver", "Latest raw frame", "Latest metadata"]
     return f"""<!doctype html>
@@ -45,9 +62,9 @@ table {{border-collapse: collapse}} th, td {{padding: 6px 10px; border: 1px soli
 <body><h1>Talli-Flug</h1><p>Receiver {escape(receiver_id)}: {"connected" if connected else "disconnected; retrying"}.</p>
 <p>Refreshes every 5 seconds. — means unknown. Aircraft state combines observations from multiple frames;
 individual values may be older than Last seen. Latest DF, receiver, raw frame, and metadata refer only to the latest accepted frame.</p>
-<p>Select an ICAO address for air data, sources, and observation times.</p>
+<p>Registration and Type are external database metadata. Select an ICAO address for aircraft metadata, air data, and sources.</p>
 <div class="table"><table><thead><tr>{''.join(f'<th scope="col">{escape(h)}</th>' for h in headings)}</tr></thead>
-<tbody>{''.join(body)}</tbody></table></div></body></html>"""
+<tbody>{''.join(body)}</tbody></table></div>{metadata_notice(metadata_source)}</body></html>"""
 
 
 def utc(timestamp):
@@ -55,6 +72,16 @@ def utc(timestamp):
 
 
 def render_details(row: dict) -> str:
+    metadata = row.get("external_metadata", {})
+    metadata_source = metadata.get("source")
+    external_rows = "".join(
+        f"<tr><th>{label}</th><td>{cell(metadata.get(key))}</td></tr>"
+        for key, label in (("registration", "Registration"), ("type_designator", "ICAO aircraft type"),
+                           ("description", "Manufacturer / model description"), ("operator", "Operator")))
+    metadata_status = "" if metadata.get("matched") else "<p>No matching local aircraft record is available.</p>"
+    if metadata_source:
+        external_rows += (f'<tr><th>Database revision</th><td>{cell(metadata_source["revision"])}</td></tr>'
+                          f'<tr><th>Database published</th><td>{cell(metadata_source.get("published_at"))}</td></tr>')
     fields = [("selected_altitude", "Selected altitude (ft)"),
               ("selected_altitude_mcp", "MCP/FCU selected altitude (ft)"),
               ("selected_altitude_fms", "FMS selected altitude (ft)"),
@@ -97,6 +124,8 @@ table {{border-collapse: collapse}} th, td {{padding: 6px 10px; border: 1px soli
 <h1>{cell(row["icao"])} {cell(row["callsign"])}</h1>
 <p>Latest observations from multiple frames; values may be older than Last seen ({cell(utc(row["last_seen"]))}).
 This details snapshot does not refresh automatically. — means unknown or unavailable.</p>
+<h2>External aircraft metadata</h2>{metadata_status}
+<table>{external_rows}</table>{metadata_notice(metadata_source)}
 <h2>Decoded reports</h2><div class="table"><table><tr><th>Field</th><th>Value</th><th>Source</th><th>Received (UTC)</th><th>Receiver</th><th>Source frame</th></tr>
 {''.join(rows)}</table></div><h2>Calculated estimates</h2>
 <p>Calculated values are not directly transmitted weather observations. Inputs must come from the same receiver,
@@ -106,19 +135,24 @@ wind below 1 kt has no reported direction.</p><div class="table">{''.join(derive
 
 
 def make_server(address: tuple[str, int], store: AircraftStore, receiver_id: str,
-                connected) -> ThreadingHTTPServer:
+                connected, metadata: MetadataLookup | None = None) -> ThreadingHTTPServer:
+    provider = metadata if metadata is not None else LocalAircraftMetadata()
+
+    def snapshot():
+        return enrich_rows(store.snapshot(), provider)
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             path = urlsplit(self.path).path
             if path == "/":
-                payload = render(store.snapshot(), receiver_id, connected()).encode()
+                payload = render(snapshot(), receiver_id, connected(), provider.source).encode()
                 content_type = "text/html; charset=utf-8"
             elif path == "/api/aircraft":
-                payload = json.dumps(store.snapshot(), allow_nan=False).encode()
+                payload = json.dumps(snapshot(), allow_nan=False).encode()
                 content_type = "application/json"
             elif re.fullmatch(r"/aircraft/[0-9A-Fa-f]{6}", path):
                 icao = path.rsplit("/", 1)[1].upper()
-                row = next((row for row in store.snapshot() if row["icao"] == icao), None)
+                row = next((row for row in snapshot() if row["icao"] == icao), None)
                 if row is None:
                     self.send_error(404, "Aircraft not current")
                     return

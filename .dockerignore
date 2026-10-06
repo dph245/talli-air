@@ -2,3 +2,6 @@
 !requirements.txt
 !talli_flug/
 !talli_flug/*.py
+!data/
+!data/aircraft-metadata.zip
+!data/README.md

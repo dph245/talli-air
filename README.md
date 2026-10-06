@@ -2,7 +2,8 @@
 
 A small, self-contained Python application that reads an existing TCP Mode-S /
 ADS-B receiver and shows current aircraft in a plain web table. No SDR access,
-database, aircraft lookup, frontend build, or external web services are required.
+database server, frontend build, or external web services are required. A bundled
+local aircraft metadata snapshot enriches registrations and types offline.
 
 ## Start with Docker
 
@@ -30,6 +31,7 @@ Use `docker compose logs -f` for connection logs and `docker compose down` to st
 | `HTTP_PORT` | `8080` | Compose's published host port |
 | `WEB_HOST`, `WEB_PORT` | `0.0.0.0`, `8080` | Python HTTP bind address; Compose uses these defaults internally |
 | `SURFACE_LAT`, `SURFACE_LON` | unset | Optional known reference coordinates for surface CPR; set both |
+| `AIRCRAFT_METADATA_PATH` | bundled `data/aircraft-metadata.zip` | Local external metadata snapshot; empty disables enrichment |
 
 The surface reference must be near the aircraft (within approximately 45 NM).
 Leave it unset unless the location is known. Airborne positions do not need a
@@ -52,6 +54,9 @@ receiver location. The host/port default lives in Compose, not receiver logic.
 * `web.py`: standard-library HTTP server with a server-rendered table, refreshed
   every five seconds. `/api/aircraft` provides the same state as JSON (`null` for
   unknown fields); `/healthz` checks HTTP liveness, not receiver connectivity.
+* `metadata.py`: local ICAO24 lookup behind a replaceable interface. Metadata is
+  joined only by the web/API layer under `external_metadata`, never merged into
+  received observations. No per-aircraft requests are made.
 * `__main__.py`: receiver worker, HTTP worker, expiration, and graceful shutdown.
   The input callback boundary and receiver-tagged CPR cache allow another reader
   to feed the same store later. This MVP configures one receiver.
@@ -145,6 +150,18 @@ and [WMM calculation and validity](https://pygeomag.readthedocs.io/en/latest/api
 
 See [the live-data report](docs/airdata-validation.md) for observed registers,
 unavailable fields, and examples from the configured receiver.
+
+## External aircraft metadata
+
+Registration and Type come from a bundled [Mictronics aircraft database](https://github.com/Mictronics/aircraft-database)
+snapshot under [ODC-By 1.0](https://opendatacommons.org/licenses/by/1-0/), with the
+full license and revision information included. Manufacturer/model description
+is shown in aircraft details. This export supplies no reliable aircraft/operator
+association, so operator stays unknown. Metadata may be outdated or incomplete
+and is explicitly separate from live receiver state.
+
+Update the bulk snapshot with `python3 tools/update_aircraft_metadata.py`, then
+rebuild/restart Docker. See [source, license, configuration, updates, and limits](docs/aircraft-metadata.md).
 
 ## Extended AVR input
 

@@ -3,6 +3,7 @@ import math
 import os
 
 from .input import ReceiverConfig
+from .metadata import DEFAULT_DATABASE
 
 
 def positive(name: str, default: str) -> float:
@@ -26,6 +27,7 @@ class Config:
     web_host: str
     web_port: int
     surface_ref: tuple[float, float] | None
+    aircraft_metadata_path: str = str(DEFAULT_DATABASE)
 
     @classmethod
     def from_env(cls):
@@ -47,4 +49,5 @@ class Config:
                            positive("RECEIVER_IDLE_SECONDS", "60")),
             positive("AIRCRAFT_TTL_SECONDS", "60"),
             os.environ.get("WEB_HOST", "0.0.0.0"), port("WEB_PORT", "8080"), ref,
+            os.environ.get("AIRCRAFT_METADATA_PATH", str(DEFAULT_DATABASE)),
         )

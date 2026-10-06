@@ -1,24 +1,33 @@
 import logging
 import signal
 import threading
+import zipfile
 
 from .config import Config
 from .input import receive
 from .state import AircraftStore
 from .web import make_server
+from .metadata import LocalAircraftMetadata
 
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     config = Config.from_env()
     store = AircraftStore(config.aircraft_ttl, config.surface_ref)
+    metadata = LocalAircraftMetadata()
+    if config.aircraft_metadata_path:
+        try:
+            metadata = LocalAircraftMetadata.load(config.aircraft_metadata_path)
+            logging.info("Loaded %s external aircraft metadata records", len(metadata))
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
+            logging.warning("Aircraft metadata unavailable: %s", exc)
     stop = threading.Event()
     connected = threading.Event()
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda *_: stop.set())
 
     server = make_server((config.web_host, config.web_port), store,
-                         config.receiver.receiver_id, connected.is_set)
+                         config.receiver.receiver_id, connected.is_set, metadata)
     web = threading.Thread(target=server.serve_forever, daemon=True)
     receiver = threading.Thread(
         target=receive,

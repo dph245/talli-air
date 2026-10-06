@@ -13,6 +13,7 @@ services:
       AIRCRAFT_TTL_SECONDS: ${AIRCRAFT_TTL_SECONDS:-60}
       SURFACE_LAT: ${SURFACE_LAT:-}
       SURFACE_LON: ${SURFACE_LON:-}
+      AIRCRAFT_METADATA_PATH: ${AIRCRAFT_METADATA_PATH-/app/data/aircraft-metadata.zip}
     init: true
     read_only: true
     cap_drop:
