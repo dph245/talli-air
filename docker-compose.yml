@@ -1,0 +1,26 @@
+services:
+  talli-flug:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    environment:
+      RECEIVER_ID: ${RECEIVER_ID:-receiver-1}
+      RECEIVER_HOST: ${RECEIVER_HOST:-192.168.88.88}
+      RECEIVER_PORT: ${RECEIVER_PORT:-47806}
+      RECONNECT_SECONDS: ${RECONNECT_SECONDS:-5}
+      RECEIVER_IDLE_SECONDS: ${RECEIVER_IDLE_SECONDS:-60}
+      AIRCRAFT_TTL_SECONDS: ${AIRCRAFT_TTL_SECONDS:-60}
+      SURFACE_LAT: ${SURFACE_LAT:-}
+      SURFACE_LON: ${SURFACE_LON:-}
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"

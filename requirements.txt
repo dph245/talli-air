@@ -1,0 +1,2 @@
+pyModeS==3.6.0
+pygeomag==1.1.0
