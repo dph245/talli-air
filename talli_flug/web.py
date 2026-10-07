@@ -36,7 +36,10 @@ def metadata_notice(source: dict | None) -> str:
 
 
 def render(rows: list[dict], receiver_id: str, connected: bool, metadata_source=None,
-           map_center=(51.0, 10.0)) -> str:
+           map_center=(51.0, 10.0), receiver_status=None) -> str:
+    statuses = receiver_status if receiver_status is not None else {receiver_id: connected}
+    status_text = "; ".join(f"{escape(key)}: {'connected' if value else 'disconnected; retrying'}"
+                            for key, value in statuses.items())
     map_data = json.dumps({"center": map_center, "aircraft": [
         {key: row.get(key) for key in ("icao", "callsign", "latitude", "longitude", "altitude",
                                      "speed", "track", "vertical_rate", "position_age_seconds")}
@@ -73,7 +76,7 @@ table {{border-collapse: collapse}} th, td {{padding: 6px 10px; border: 1px soli
 #map {{height: 280px; max-width: 900px; margin: 16px 0; background: #eee}}
 .aircraft-icon svg {{display: block; width: 24px; height: 24px}}
 </style></head>
-<body><h1>Talli-Flug</h1><p id="receiver-status">Receiver {escape(receiver_id)}: {"connected" if connected else "disconnected; retrying"}.</p>
+<body><h1>Talli-Flug</h1><p id="receiver-status">Receivers: {status_text}.</p>
 <p>Refreshes every 5 seconds. — means unknown. Aircraft state combines observations from multiple frames;
 individual values may be older than Last seen. Latest DF, receiver, raw frame, and metadata refer only to the latest accepted frame.</p>
 <p>Registration and Type are external database metadata. Select an ICAO address for aircraft metadata, air data, and sources.</p>
@@ -154,7 +157,7 @@ wind below 1 kt has no reported direction.</p><div class="table">{''.join(derive
 
 def make_server(address: tuple[str, int], store: AircraftStore, receiver_id: str,
                 connected, metadata: MetadataLookup | None = None,
-                map_center=(51.0, 10.0)) -> ThreadingHTTPServer:
+                map_center=(51.0, 10.0), receiver_status=None) -> ThreadingHTTPServer:
     provider = metadata if metadata is not None else LocalAircraftMetadata()
 
     def snapshot():
@@ -164,7 +167,8 @@ def make_server(address: tuple[str, int], store: AircraftStore, receiver_id: str
         def do_GET(self):
             path = urlsplit(self.path).path
             if path == "/":
-                payload = render(snapshot(), receiver_id, connected(), provider.source, map_center).encode()
+                payload = render(snapshot(), receiver_id, connected(), provider.source, map_center,
+                                 receiver_status() if receiver_status else None).encode()
                 content_type = "text/html; charset=utf-8"
             elif path == "/static/aircraft.js":
                 payload = (Path(__file__).parent / "static" / "aircraft.js").read_bytes()

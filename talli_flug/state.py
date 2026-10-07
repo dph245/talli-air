@@ -23,6 +23,9 @@ class Observation:
     raw_frame: str
     source: str
     value: object
+    beast_timestamp: int | None = None
+    signal_level: int | None = None
+    beast_type: int | None = None
 
 
 @dataclass
@@ -56,6 +59,10 @@ class Aircraft:
     receiver_id: str = ""
     latest_raw_frame: str = ""
     receiver_metadata: tuple[str, ...] = ()
+    beast_timestamp: int | None = None
+    signal_level: int | None = None
+    beast_type: int | None = None
+    receiver_observations: dict[str, Frame] = field(default_factory=dict, repr=False)
     updated: float = field(default=0, repr=False)
     adsb_verified_at: float | None = field(default=None, repr=False)
     observations: dict[str, Observation] = field(default_factory=dict, repr=False)
@@ -67,7 +74,8 @@ class Aircraft:
         """Timestamp an actual report, including an explicitly unavailable value."""
         setattr(self, name, value)
         self.observations[name] = Observation(frame.received_at, frame.received_monotonic,
-                                               frame.receiver_id, frame.raw, source, value)
+                                               frame.receiver_id, frame.raw, source, value,
+                                               frame.beast_timestamp, frame.signal_level, frame.beast_type)
 
     def invalidate(self, *names: str) -> None:
         """A transition invalidates retained values; it does not observe new ones."""
@@ -119,6 +127,12 @@ class AircraftStore:
             if df in (0, 4, 5, 16, 20, 21) and icao not in self.aircraft:
                 return
             aircraft = self.aircraft.setdefault(icao, Aircraft(icao))
+            aircraft.receiver_observations = {
+                key: observation for key, observation in aircraft.receiver_observations.items()
+                if frame.received_monotonic - observation.received_monotonic < self.ttl}
+            previous = aircraft.receiver_observations.get(frame.receiver_id)
+            if previous is None or frame.received_monotonic >= previous.received_monotonic:
+                aircraft.receiver_observations[frame.receiver_id] = frame
             if frame.received_monotonic < aircraft.updated:
                 return
             if df in (17, 18) and decoded.get("crc_valid") is True:
@@ -129,6 +143,9 @@ class AircraftStore:
             aircraft.receiver_id = frame.receiver_id
             aircraft.latest_raw_frame = frame.raw
             aircraft.receiver_metadata = frame.metadata
+            aircraft.beast_timestamp = frame.beast_timestamp
+            aircraft.signal_level = frame.signal_level
+            aircraft.beast_type = frame.beast_type
             tc = decoded.get("typecode", 0)
             ground = None
             if df in (17, 18):
@@ -202,6 +219,11 @@ class AircraftStore:
             for aircraft in sorted(self.aircraft.values(), key=lambda item: item.icao):
                 row = asdict(aircraft)
                 del row["updated"], row["cpr"], row["observations"], row["adsb_verified_at"]
+                row["receiver_observations"] = {
+                    key: {name: value for name, value in asdict(frame).items()
+                          if name != "received_monotonic"}
+                    for key, frame in aircraft.receiver_observations.items()
+                    if now - frame.received_monotonic < self.ttl}
                 row["field_observations"] = {
                     name: {key: value for key, value in asdict(observation).items()
                            if key != "received_monotonic"}

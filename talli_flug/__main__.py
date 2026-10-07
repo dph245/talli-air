@@ -22,33 +22,40 @@ def main():
         except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
             logging.warning("Aircraft metadata unavailable: %s", exc)
     stop = threading.Event()
-    connected = threading.Event()
+    connections = {receiver.receiver_id: threading.Event() for receiver in config.receivers}
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda *_: stop.set())
 
     server = make_server((config.web_host, config.web_port), store,
-                         config.receiver.receiver_id, connected.is_set, metadata, config.map_center)
+                         "", lambda: False, metadata, config.map_center,
+                         receiver_status=lambda: {key: event.is_set() for key, event in connections.items()})
     web = threading.Thread(target=server.serve_forever, daemon=True)
-    receiver = threading.Thread(
-        target=receive,
-        args=(config.receiver, store.update, stop,
-              lambda value: connected.set() if value else connected.clear()),
-        daemon=True,
-    )
+    receivers = []
+    for receiver_config in config.receivers:
+        connected = connections[receiver_config.receiver_id]
+        worker = threading.Thread(
+            target=receive,
+            args=(receiver_config, store.update, stop,
+                  lambda value, event=connected: event.set() if value else event.clear()),
+            name=f"receiver-{receiver_config.receiver_id}", daemon=True,
+        )
+        receivers.append(worker)
     web.start()
-    receiver.start()
+    for worker in receivers:
+        worker.start()
     logging.info("Talli-Flug listening on %s:%s", config.web_host, config.web_port)
     try:
         while not stop.wait(1):
             store.expire()
-            if not receiver.is_alive() or not web.is_alive():
+            if not web.is_alive():
                 raise RuntimeError("Application worker stopped unexpectedly")
     finally:
         stop.set()
         server.shutdown()
         server.server_close()
         web.join(timeout=2)
-        receiver.join(timeout=6)
+        for worker in receivers:
+            worker.join(timeout=6)
 
 
 if __name__ == "__main__":

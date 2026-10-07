@@ -41,7 +41,7 @@ def test_tcp_reconnect_and_web():
 
         sender = threading.Thread(target=send, daemon=True)
         reader = threading.Thread(target=receive, args=(
-            ReceiverConfig("test-rx", "127.0.0.1", listener.getsockname()[1], 0.01),
+            ReceiverConfig("test-rx", "127.0.0.1", listener.getsockname()[1], 0.01, protocol="avr"),
             consume, stop, states.append), daemon=True)
         sender.start()
         reader.start()

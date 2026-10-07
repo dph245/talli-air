@@ -1,7 +1,7 @@
 # Talli-Flug
 
-A small, self-contained Python application that reads an existing TCP Mode-S /
-ADS-B receiver and shows current aircraft in a plain web table. No SDR access,
+A small, self-contained Python application that reads existing TCP Mode-S /
+ADS-B receivers and shows current aircraft in a plain web table. No SDR access,
 database server, frontend build, or external web services are required. A bundled
 local aircraft metadata snapshot enriches registrations and types offline.
 
@@ -11,7 +11,7 @@ local aircraft metadata snapshot enriches registrations and types offline.
 docker compose up -d --build
 ```
 
-Open <http://localhost:8080>. Compose defaults to receiver `192.168.88.88:47806`
+Open <http://localhost:8080>. Compose defaults to receiver `192.168.88.88:30005`
 with ID `receiver-1`. The container needs ordinary outbound TCP access to that
 address; no privileged mode, host networking, or device access is used.
 
@@ -22,10 +22,13 @@ Use `docker compose logs -f` for connection logs and `docker compose down` to st
 
 | Environment variable | Default | Meaning |
 | --- | --- | --- |
+| `RECEIVERS` | unset | JSON array of receivers; overrides single-receiver settings (example below) |
+| `RECEIVER_PROTOCOL` | `beast` | Single-receiver input: `beast` or optional `avr` |
 | `RECEIVER_HOST` | `192.168.88.88` in Compose; required otherwise | TCP receiver host |
-| `RECEIVER_PORT` | `47806` | TCP receiver port |
+| `RECEIVER_PORT` | `30005` | TCP receiver port |
 | `RECEIVER_ID` | `receiver-1` | ID carried on every parsed frame |
-| `RECONNECT_SECONDS` | `5` | Delay between connection attempts |
+| `RECONNECT_SECONDS` | `5` | Initial reconnect delay per receiver; doubles after each failure |
+| `RECONNECT_MAX_SECONDS` | `60` | Maximum reconnect delay; resets after a connection receives data for at least the idle timeout |
 | `RECEIVER_IDLE_SECONDS` | `60` | Reconnect if no bytes arrive for this long |
 | `AIRCRAFT_TTL_SECONDS` | `60` | Remove aircraft after this many seconds without an accepted frame |
 | `HTTP_PORT` | `8080` | Compose's published host port |
@@ -35,13 +38,26 @@ Use `docker compose logs -f` for connection logs and `docker compose down` to st
 
 The surface reference must be near the aircraft (within approximately 45 NM).
 Leave it unset unless the location is known. Airborne positions do not need a
-receiver location. The host/port default lives in Compose, not receiver logic.
+receiver location. The default host lives in Compose.
+
+For two receivers, copy `.env.example` to `.env` and set their actual addresses:
+
+```sh
+RECEIVERS='[{"receiver_id":"roof","host":"192.168.88.88"},{"receiver_id":"shed","host":"192.168.88.89"}]'
+```
+
+Each entry requires a unique, stable `receiver_id` and `host`; `port` defaults to
+30005 and `protocol` to `beast`. IDs are explicitly configured, never derived from
+array order or IP address. Optional AVR entries use `"protocol":"avr"` and their
+AVR port. Both formats feed the same decoder and aircraft store. Each receiver
+has its own connection, idle timeout, parser and interruptible capped exponential
+backoff. A receiver disconnect does not stop other receivers or HTTP service.
 
 ## Architecture and behavior
 
-* `input.py`: reconnecting TCP reader, bounded line framing, and immutable frames
-  carrying receiver ID, raw hex, metadata fields, UTC receipt time, and monotonic
-  receipt time. Fragmented/coalesced TCP chunks and CRLF/LF/CR lines are supported.
+* `input.py`: reconnecting TCP reader, bounded Beast/AVR framing, and immutable
+  frames carrying receiver ID, raw hex, transport metadata and local receipt times.
+  Fragmented/coalesced TCP chunks are supported.
 * `state.py`: [pyModeS 3.6.0](https://github.com/junzis/pyModeS) decodes protocol
   fields; a locked in-memory dictionary merges observations by ICAO. Latest
   even/odd CPR halves are retained per aircraft, receiver, and position family.
@@ -57,9 +73,7 @@ receiver location. The host/port default lives in Compose, not receiver logic.
 * `metadata.py`: local ICAO24 lookup behind a replaceable interface. Metadata is
   joined only by the web/API layer under `external_metadata`, never merged into
   received observations. No per-aircraft requests are made.
-* `__main__.py`: receiver worker, HTTP worker, expiration, and graceful shutdown.
-  The input callback boundary and receiver-tagged CPR cache allow another reader
-  to feed the same store later. This MVP configures one receiver.
+* `__main__.py`: independent receiver workers, HTTP worker, expiration, and graceful shutdown.
 
 The table shows ICAO, latest DF, callsign, airborne/ground state, latitude/longitude,
 barometric and selected altitude in feet, ground speed in knots, true track in degrees,
@@ -163,7 +177,26 @@ and is explicitly separate from live receiver state.
 Update the bulk snapshot with `python3 tools/update_aircraft_metadata.py`, then
 rebuild/restart Docker. See [source, license, configuration, updates, and limits](docs/aircraft-metadata.md).
 
-## Extended AVR input
+## Beast Binary TCP input (default)
+
+The streaming parser follows the [Jetvision Beast binary format](https://wiki.jetvision.de/wiki/Mode-S_Beast%3AData_Output_Formats).
+It accepts types `0x32` (56-bit Mode-S) and `0x33` (112-bit Mode-S), unescapes doubled
+`0x1a` bytes throughout the body, and extracts the six-byte big-endian timestamp
+and one-byte signal level. Mode A/C (`0x31`) and status (`0x34`) records are consumed
+without sending them to the Mode-S decoder. Unknown types and damaged records
+are skipped, resynchronizing at the next marker. Incomplete records are discarded
+on reconnect; parser storage is bounded to one frame.
+
+`beast_timestamp` retains the raw 48-bit receiver-local counter and `signal_level`
+the raw unsigned byte (0–255); neither is interpreted as UTC or calibrated dBm.
+`beast_type` retains the numeric type byte. These fields appear on the latest
+accepted aircraft frame and its decoded field observations. `receiver_observations`
+in the JSON API retains the latest accepted raw observation from each receiver,
+expiring entries with the aircraft TTL. AVR sets Beast fields to null. CPR,
+expiration and derived-data freshness continue to use local monotonic receipt
+times; counters from different receivers are never compared.
+
+## Extended AVR input (optional compatibility)
 
 Observed example supplied for this project:
 
@@ -184,7 +217,8 @@ Malformed/non-ASCII records, mismatched DF/length, and lines exceeding 4096 byte
 are discarded. An oversized record is skipped through the next line delimiter.
 Incomplete records are discarded on disconnect. Only complete newline-terminated
 records are consumed; semicolons alone cannot delimit records with unknown
-metadata field counts. Raw Beast binary and timestamp-prefixed AVR are unsupported.
+metadata field counts. Timestamp-prefixed AVR is unsupported. Select this input
+explicitly with `protocol: avr` (JSON) or `RECEIVER_PROTOCOL=avr` (single receiver).
 
 ## Decode limits
 
@@ -251,7 +285,9 @@ Run tests and build validation:
 docker compose build
 ```
 
-Tests cover extended AVR metadata, 56/112-bit frames, malformed and oversized
+Tests cover Beast fragmentation, coalescing, escaping, malformed/truncated input,
+independent reconnect/backoff and simultaneous receivers, extended AVR metadata,
+56/112-bit frames, malformed and oversized
 input, TCP fragmentation and reconnection, state merging, CRC rejection,
 airborne CPR in both arrival orders, stale/cross-receiver/incompatible CPR
 halves, surface reference handling, ground transitions, expiration, configuration,
