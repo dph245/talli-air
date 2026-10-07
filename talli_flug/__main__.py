@@ -27,7 +27,7 @@ def main():
         signal.signal(signum, lambda *_: stop.set())
 
     server = make_server((config.web_host, config.web_port), store,
-                         config.receiver.receiver_id, connected.is_set, metadata)
+                         config.receiver.receiver_id, connected.is_set, metadata, config.map_center)
     web = threading.Thread(target=server.serve_forever, daemon=True)
     receiver = threading.Thread(
         target=receive,

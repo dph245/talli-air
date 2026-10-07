@@ -210,6 +210,32 @@ metadata field counts. Raw Beast binary and timestamp-prefixed AVR are unsupport
 
 ## Local development and tests
 
+The aircraft page includes a modest Leaflet 1.9.4 map using OpenStreetMap tiles.
+The existing table and map refresh together every five seconds without reloading
+the map. Markers show current aircraft with valid coordinates; expired aircraft
+and invalidated positions disappear. Aircraft symbols rotate to true track;
+unknown tracks use a circle. Popups contain only callsign (when known), ICAO,
+barometric altitude, ground speed, track, vertical rate, and position age.
+Position age comes from the last successfully decoded CPR position, independently
+of `last_seen`; the JSON API exposes `position_observed_at` and
+`position_age_seconds` (monotonic elapsed seconds).
+
+The initial view fits available positions, with a maximum initial zoom of 10.
+With no positions it starts at `MAP_LAT=51`, `MAP_LON=10` (Germany), zoom 6;
+these environment variables also work in Docker Compose. It fits the first
+positions when they arrive, then preserves the user's pan and zoom.
+Leaflet is pinned with integrity checks and loaded from unpkg; tiles load directly
+from OpenStreetMap with attribution and normal browser caching, following the
+[OSM tile policy](https://operations.osmfoundation.org/policies/tiles/).
+No frontend build or runtime Python dependency is added. The table still refreshes
+if Leaflet cannot load; without JavaScript the page uses its original full-page
+refresh. Failed background refreshes display a plain stale-data notice and retry.
+
+Optional real-browser map regression (requires Playwright and Chromium):
+`PYTHONPATH=. .venv/bin/python tests/browser_map.py`. It checks marker movement,
+orientation, removal, popup escaping, fallback center, viewport persistence, and
+refresh failure/recovery. Map tiles are intercepted to avoid test tile traffic.
+
 Python 3.13 is used by Docker. To run locally:
 
 ```sh

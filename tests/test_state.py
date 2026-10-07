@@ -220,3 +220,22 @@ def test_unavailable_altitude_records_report_time_without_retaining_old_value():
     assert aircraft.altitude is None
     assert aircraft.observations["altitude"].received_at == 1001
     assert aircraft.observations["altitude"].received_monotonic == 101
+
+
+def test_snapshot_position_age_is_independent_of_latest_frame(monkeypatch):
+    monkeypatch.setattr(time, "monotonic", lambda: 110)
+    store = AircraftStore(ttl=20)
+    store.update(replace(frame(EVEN, at=100), received_at=1000))
+    assert store.snapshot()[0]["position_observed_at"] is None
+    store.update(replace(frame(ODD, at=105), received_at=1005))
+    store.update(replace(frame(with_crc("5D40621D000000"), at=109), received_at=1009))
+    row, = store.snapshot()
+    assert row["last_seen"] == 1009
+    assert row["position_observed_at"] == 1005
+    assert row["position_age_seconds"] == 5
+    ground = with_crc("8D40621D28000000000000000000")
+    store.update(replace(frame(ground, at=110), received_at=1010))
+    row, = store.snapshot()
+    assert row["position_observed_at"] is row["position_age_seconds"] is None
+    monkeypatch.setattr(time, "monotonic", lambda: 130)
+    assert store.snapshot() == []

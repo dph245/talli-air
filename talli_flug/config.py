@@ -28,6 +28,7 @@ class Config:
     web_port: int
     surface_ref: tuple[float, float] | None
     aircraft_metadata_path: str = str(DEFAULT_DATABASE)
+    map_center: tuple[float, float] = (51.0, 10.0)
 
     @classmethod
     def from_env(cls):
@@ -43,6 +44,10 @@ class Config:
             ref = (float(lat), float(lon))
             if not (-90 <= ref[0] <= 90 and -180 <= ref[1] <= 180):
                 raise ValueError("Invalid surface reference coordinates")
+        map_center = (float(os.environ.get("MAP_LAT", "51")),
+                      float(os.environ.get("MAP_LON", "10")))
+        if not (-90 <= map_center[0] <= 90 and -180 <= map_center[1] <= 180):
+            raise ValueError("Invalid map center coordinates")
         return cls(
             ReceiverConfig(receiver_id, host, port("RECEIVER_PORT", "47806"),
                            positive("RECONNECT_SECONDS", "5"),
@@ -50,4 +55,5 @@ class Config:
             positive("AIRCRAFT_TTL_SECONDS", "60"),
             os.environ.get("WEB_HOST", "0.0.0.0"), port("WEB_PORT", "8080"), ref,
             os.environ.get("AIRCRAFT_METADATA_PATH", str(DEFAULT_DATABASE)),
+            map_center,
         )

@@ -5,6 +5,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import re
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from .state import AircraftStore
@@ -34,7 +35,12 @@ def metadata_notice(source: dict | None) -> str:
             'These database records are not receiver observations and may be outdated.</p>')
 
 
-def render(rows: list[dict], receiver_id: str, connected: bool, metadata_source=None) -> str:
+def render(rows: list[dict], receiver_id: str, connected: bool, metadata_source=None,
+           map_center=(51.0, 10.0)) -> str:
+    map_data = json.dumps({"center": map_center, "aircraft": [
+        {key: row.get(key) for key in ("icao", "callsign", "latitude", "longitude", "altitude",
+                                     "speed", "track", "vertical_rate", "position_age_seconds")}
+        for row in rows]}, allow_nan=False).replace("<", "\\u003c")
     body = []
     for row in rows:
         ground = row["on_ground"]
@@ -55,14 +61,26 @@ def render(rows: list[dict], receiver_id: str, connected: bool, metadata_source=
                 "Vertical rate (ft/min)", "Last seen (UTC)", "Latest receiver", "Latest raw frame", "Latest metadata"]
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="5"><title>Talli-Flug</title>
+<noscript><meta http-equiv="refresh" content="5"></noscript><title>Talli-Flug</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+ integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+ integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script defer src="/static/aircraft.js"></script>
 <style>body {{font: 14px system-ui, sans-serif; margin: 24px; color: #222; background: white}}
 table {{border-collapse: collapse}} th, td {{padding: 6px 10px; border: 1px solid #bbb; text-align: left; white-space: nowrap}}
-.table {{overflow-x: auto}} h1 {{font-size: 24px}}</style></head>
-<body><h1>Talli-Flug</h1><p>Receiver {escape(receiver_id)}: {"connected" if connected else "disconnected; retrying"}.</p>
+.table {{overflow-x: auto}} h1 {{font-size: 24px}}
+#map {{height: 280px; max-width: 900px; margin: 16px 0; background: #eee}}
+.aircraft-icon svg {{display: block; width: 24px; height: 24px}}
+</style></head>
+<body><h1>Talli-Flug</h1><p id="receiver-status">Receiver {escape(receiver_id)}: {"connected" if connected else "disconnected; retrying"}.</p>
 <p>Refreshes every 5 seconds. — means unknown. Aircraft state combines observations from multiple frames;
 individual values may be older than Last seen. Latest DF, receiver, raw frame, and metadata refer only to the latest accepted frame.</p>
 <p>Registration and Type are external database metadata. Select an ICAO address for aircraft metadata, air data, and sources.</p>
+<div id="map" aria-label="Current aircraft positions">Map requires JavaScript and Leaflet.</div>
+<p>Map positions may be older than Last seen; select an aircraft for its position age. Markers without a known track are circles.</p>
+<p id="refresh-status" role="status"></p>
+<script id="map-data" type="application/json">{map_data}</script>
 <div class="table"><table><thead><tr>{''.join(f'<th scope="col">{escape(h)}</th>' for h in headings)}</tr></thead>
 <tbody>{''.join(body)}</tbody></table></div>{metadata_notice(metadata_source)}</body></html>"""
 
@@ -135,7 +153,8 @@ wind below 1 kt has no reported direction.</p><div class="table">{''.join(derive
 
 
 def make_server(address: tuple[str, int], store: AircraftStore, receiver_id: str,
-                connected, metadata: MetadataLookup | None = None) -> ThreadingHTTPServer:
+                connected, metadata: MetadataLookup | None = None,
+                map_center=(51.0, 10.0)) -> ThreadingHTTPServer:
     provider = metadata if metadata is not None else LocalAircraftMetadata()
 
     def snapshot():
@@ -145,8 +164,11 @@ def make_server(address: tuple[str, int], store: AircraftStore, receiver_id: str
         def do_GET(self):
             path = urlsplit(self.path).path
             if path == "/":
-                payload = render(snapshot(), receiver_id, connected(), provider.source).encode()
+                payload = render(snapshot(), receiver_id, connected(), provider.source, map_center).encode()
                 content_type = "text/html; charset=utf-8"
+            elif path == "/static/aircraft.js":
+                payload = (Path(__file__).parent / "static" / "aircraft.js").read_bytes()
+                content_type = "text/javascript; charset=utf-8"
             elif path == "/api/aircraft":
                 payload = json.dumps(snapshot(), allow_nan=False).encode()
                 content_type = "application/json"

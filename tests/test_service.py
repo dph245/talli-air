@@ -7,7 +7,7 @@ import pytest
 
 from talli_flug.config import Config
 from talli_flug.input import ReceiverConfig, receive
-from talli_flug.state import AircraftStore
+from talli_flug.state import Aircraft, AircraftStore
 from talli_flug.metadata import AircraftMetadata, LocalAircraftMetadata
 from talli_flug.web import make_server, render
 
@@ -70,6 +70,11 @@ def test_tcp_reconnect_and_web():
             assert "Talli-Flug" in html and "440DA5" in html
             assert "OE-IDS" in html and "Registration</th>" in html
             assert "disconnected" in html and "FE3418B8" in html
+            assert 'id="map"' in html and 'Latest DF</th>' in html
+            assert 'Latest raw frame</th>' in html
+        with urlopen(base + "/static/aircraft.js") as response:
+            assert response.headers["Content-Type"].startswith("text/javascript")
+            assert "tile.openstreetmap.org" in response.read().decode()
         with urlopen(base + "/api/aircraft") as response:
             row, = json.load(response)
             assert row["receiver_id"] == "test-rx"
@@ -100,9 +105,30 @@ def test_html_escaping():
     ("RECEIVER_HOST", ""), ("RECEIVER_ID", ""), ("RECEIVER_PORT", "65536"),
     ("AIRCRAFT_TTL_SECONDS", "0"), ("RECONNECT_SECONDS", "nan"),
     ("RECEIVER_IDLE_SECONDS", "inf"), ("SURFACE_LAT", "42"),
+    ("MAP_LAT", "nan"), ("MAP_LAT", "91"), ("MAP_LON", "181"),
 ])
 def test_invalid_config(monkeypatch, name, value):
     monkeypatch.setenv("RECEIVER_HOST", "receiver.test")
     monkeypatch.setenv(name, value)
     with pytest.raises(ValueError):
         Config.from_env()
+
+
+def test_configurable_map_center(monkeypatch):
+    monkeypatch.setenv("RECEIVER_HOST", "receiver.test")
+    monkeypatch.setenv("MAP_LAT", "0")
+    monkeypatch.setenv("MAP_LON", "-25.5")
+    assert Config.from_env().map_center == (0, -25.5)
+
+
+def test_map_data_cannot_close_script_element():
+    import time
+    store = AircraftStore()
+    store.aircraft["ABC123"] = Aircraft("ABC123", callsign="</script><script>alert(1)</script>",
+                                       updated=time.monotonic())
+    html = render(store.snapshot(), "test", True, map_center=(0, 0))
+    data = html.split('<script id="map-data" type="application/json">', 1)[1].split('</script>', 1)[0]
+    assert '<' not in data
+    parsed = json.loads(data)
+    assert parsed["center"] == [0, 0]
+    assert parsed["aircraft"][0]["callsign"] == "</script><script>alert(1)</script>"

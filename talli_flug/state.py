@@ -208,5 +208,8 @@ class AircraftStore:
                     for name, observation in aircraft.observations.items()
                 }
                 row["derived"] = derive_airdata(aircraft, now)
+                position = aircraft.observations.get("latitude")
+                row["position_observed_at"] = position.received_at if position else None
+                row["position_age_seconds"] = max(0, now - position.received_monotonic) if position else None
                 rows.append(row)
             return rows
