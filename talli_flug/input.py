@@ -86,8 +86,9 @@ class BeastBuffer:
 
     LENGTHS = {0x31: 9, 0x32: 14, 0x33: 21, 0x34: 9}
 
-    def __init__(self, receiver_id: str):
+    def __init__(self, receiver_id: str, laboratory=False):
         self.receiver_id = receiver_id
+        self.laboratory = laboratory
         self.buffer = bytearray()
         self.kind = None
         self.escape = False
@@ -110,6 +111,10 @@ class BeastBuffer:
             self.buffer.append(byte)
             if len(self.buffer) == self.LENGTHS[self.kind]:
                 data = bytes(self.buffer)
+                if self.laboratory and self.kind in (0x31, 0x34):
+                    frames.append(Frame(self.receiver_id, "", (), time.time(), time.monotonic(),
+                                        int.from_bytes(data[:6], "big") if self.kind == 0x31 else None,
+                                        data[6] if self.kind == 0x31 else None, self.kind))
                 if self.kind in (0x32, 0x33) and self.receiver_id:
                     payload = data[7:]
                     if len(payload) == (14 if payload[0] >> 3 >= 16 else 7):
@@ -131,8 +136,23 @@ class ReceiverConfig:
     idle_seconds: float = 60
     protocol: str = "beast"
     reconnect_max_seconds: float = 60
+    latitude: float | None = None
+    longitude: float | None = None
+    terrain_height_m: float | None = None
+    antenna_height_agl_m: float | None = None
+    chain_label: str | None = None
 
     def __post_init__(self):
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("Set both receiver latitude and longitude")
+        for value, low, high in ((self.latitude, -90, 90), (self.longitude, -180, 180),
+                                 (self.terrain_height_m, -math.inf, math.inf),
+                                 (self.antenna_height_agl_m, 0, math.inf)):
+            if value is not None and (type(value) not in (int, float) or not math.isfinite(value)
+                                      or not low <= value <= high):
+                raise ValueError("Invalid receiver location")
+        if self.chain_label is not None and not isinstance(self.chain_label, str):
+            raise ValueError("Invalid receiver chain label")
         if not isinstance(self.receiver_id, str) or not self.receiver_id.strip():
             raise ValueError("receiver_id must be nonempty")
         if not isinstance(self.host, str) or not self.host.strip():
@@ -148,17 +168,22 @@ class ReceiverConfig:
             raise ValueError("maximum reconnect delay must be at least the initial delay")
 
 
-def receive(config: ReceiverConfig, consume: Callable[[Frame], None],
-            stop: threading.Event, status: Callable[[bool], None]) -> None:
+def receive(config: ReceiverConfig, consume: Callable[[Frame], str | None],
+            stop: threading.Event, status: Callable[[bool], None],
+            message_rate=None, lab=None) -> None:
     delay = config.reconnect_seconds
     while not stop.is_set():
+        online = False
         try:
             with socket.create_connection((config.host, config.port), timeout=5) as sock:
                 sock.settimeout(min(1, config.idle_seconds))
-                buffer = BeastBuffer(config.receiver_id) if config.protocol == "beast" else LineBuffer()
+                buffer = BeastBuffer(config.receiver_id, lab is not None) if config.protocol == "beast" else LineBuffer()
                 connected_at = time.monotonic()
                 last_data = time.monotonic()
                 status(True)
+                online = True
+                if lab is not None:
+                    lab.connection(config.receiver_id, True)
                 LOG.info("Receiver %s connected", config.receiver_id)
                 while not stop.is_set():
                     try:
@@ -173,13 +198,29 @@ def receive(config: ReceiverConfig, consume: Callable[[Frame], None],
                     # Reset after a stable connection, not a connect/close loop.
                     if last_data - connected_at >= config.idle_seconds:
                         delay = config.reconnect_seconds
-                    for item in buffer.feed(chunk):
-                        frame = item if config.protocol == "beast" else parse_line(item, config.receiver_id)
-                        if frame is not None:
-                            consume(frame)
+                    if lab is not None:
+                        lab.begin_chunk(config.receiver_id)
+                    try:
+                        for item in buffer.feed(chunk):
+                            frame = item if config.protocol == "beast" else parse_line(item, config.receiver_id)
+                            if frame is None or not frame.raw:
+                                continue
+                            if message_rate is not None:
+                                message_rate.increment(config.receiver_id)
+                            result = "processing_error"
+                            try:
+                                result = consume(frame)
+                            finally:
+                                if lab is not None:
+                                    lab.record(frame, result or "not_accepted")
+                    finally:
+                        if lab is not None:
+                            lab.end_chunk(config.receiver_id)
         except OSError as exc:
             LOG.warning("Receiver %s disconnected: %s", config.receiver_id, exc)
         finally:
             status(False)
+            if online and lab is not None:
+                lab.connection(config.receiver_id, False)
         stop.wait(delay)
         delay = min(config.reconnect_max_seconds, delay * 2)

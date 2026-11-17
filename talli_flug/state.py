@@ -100,7 +100,7 @@ class AircraftStore:
             if now - self.aircraft[icao].updated >= self.ttl:
                 del self.aircraft[icao]
 
-    def update(self, frame: Frame) -> None:
+    def update(self, frame: Frame) -> str | None:
         try:
             # Include meteorological validators when checking ambiguity too.
             # A preferred candidate alone is not a confidence decision.
@@ -134,7 +134,7 @@ class AircraftStore:
             if previous is None or frame.received_monotonic >= previous.received_monotonic:
                 aircraft.receiver_observations[frame.receiver_id] = frame
             if frame.received_monotonic < aircraft.updated:
-                return
+                return "accepted" if aircraft.receiver_observations.get(frame.receiver_id) is frame else None
             if df in (17, 18) and decoded.get("crc_valid") is True:
                 aircraft.adsb_verified_at = frame.received_monotonic
             aircraft.df = df
@@ -179,11 +179,11 @@ class AircraftStore:
             if df in (0, 4, 16, 20) or (df in (17, 18) and 9 <= tc <= 18):
                 aircraft.observe("altitude", decoded.get("altitude"), frame)
 
-            if "cpr_format" in decoded:
-                self._position(aircraft, frame, decoded)
+            resolved = "cpr_format" in decoded and self._position(aircraft, frame, decoded)
             apply_airdata(aircraft, frame, decoded)
+            return "position" if resolved else "accepted"
 
-    def _position(self, aircraft: Aircraft, frame: Frame, decoded: dict) -> None:
+    def _position(self, aircraft: Aircraft, frame: Frame, decoded: dict) -> bool:
         tc = decoded["typecode"]
         family = "surface" if tc <= 8 else "baro" if tc <= 18 else "gnss"
         parity = decoded["cpr_format"]
@@ -191,15 +191,16 @@ class AircraftStore:
         aircraft.cpr = {key: value for key, value in aircraft.cpr.items()
                         if now - value[0] <= 10}
         key = (frame.receiver_id, family, parity)
+        previous = aircraft.cpr.get(key)
         aircraft.cpr[key] = (now, decoded["cpr_lat"], decoded["cpr_lon"])
         even = aircraft.cpr.get((frame.receiver_id, family, 0))
         odd = aircraft.cpr.get((frame.receiver_id, family, 1))
         if even is None or odd is None or abs(even[0] - odd[0]) > 10:
-            return
+            return False
         args = (*even[1:], *odd[1:])
         if family == "surface":
             if self.surface_ref is None:
-                return
+                return False
             position = surface_position_pair(*args, lat_ref=self.surface_ref[0],
                                              lon_ref=self.surface_ref[1],
                                              even_is_newer=even[0] >= odd[0])
@@ -210,6 +211,11 @@ class AircraftStore:
             # receipt time, not the time of a later unrelated raw frame.
             aircraft.observe("latitude", position[0], frame, "ADS-B CPR pair")
             aircraft.observe("longitude", position[1], frame, "ADS-B CPR pair")
+        opposite = odd if parity == 0 else even
+        return position is not None and not (
+            previous is not None and previous[0] >= opposite[0]
+            and previous[1:] == aircraft.cpr[key][1:]
+        )
 
     def snapshot(self) -> list[dict]:
         with self.lock:

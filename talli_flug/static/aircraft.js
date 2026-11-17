@@ -1,7 +1,14 @@
-/* Keep the server-rendered table and the map on the same five-second snapshot. */
 (() => {
     const initial = JSON.parse(document.getElementById('map-data').textContent);
+    const body = document.getElementById('aircraft-rows');
+    const search = document.getElementById('search-box');
+    const sortButtons = document.querySelectorAll('[data-sort]');
+    const status = document.getElementById('refresh-status');
+    const refreshInterval = 5000;
     const markers = new Map();
+    let aircraft = initial.aircraft;
+    let sortKey = 'icao';
+    let ascending = true;
     let map;
     let fitted = false;
     let sampledAt = performance.now();
@@ -54,8 +61,11 @@
                 marker.bindPopup(() => popup(entry.row), {autoPan: false});
                 markers.set(row.icao, entry);
             } else {
+                if (entry.row.latitude !== row.latitude || entry.row.longitude !== row.longitude) {
+                    entry.marker.setLatLng(position);
+                }
+                if (entry.row.track !== row.track) entry.marker.setIcon(icon(row.track));
                 entry.row = row;
-                entry.marker.setLatLng(position).setIcon(icon(row.track));
                 if (entry.marker.isPopupOpen()) entry.marker.setPopupContent(() => popup(entry.row));
             }
         }
@@ -81,6 +91,7 @@
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         }).addTo(map);
         updateMap(initial.aircraft);
+        if (!fitted) map.once('movestart', () => { fitted = true; });
     }
 
     // Age continues increasing even if the receiver or refresh request stops.
@@ -90,22 +101,153 @@
         }
     }, 1000);
 
+    function element(tag, text) {
+        const node = document.createElement(tag);
+        node.textContent = text;
+        return node;
+    }
+
+    function compareRows(left, right) {
+        const byIcao = left.icao.localeCompare(right.icao);
+        const direction = ascending ? 1 : -1;
+        if (sortKey === 'icao') return direction * byIcao;
+        const leftValue = left[sortKey];
+        const rightValue = right[sortKey];
+        if (leftValue == null) return rightValue == null ? byIcao : 1;
+        if (rightValue == null) return -1;
+        return direction * (leftValue - rightValue) || byIcao;
+    }
+
+    function updateTable() {
+        const query = search.value.trim().toLowerCase();
+        const rows = aircraft.filter(row => [row.icao, row.callsign, row.external_metadata?.registration]
+            .some(text => text?.toLowerCase().includes(query))).sort(compareRows);
+        const fragment = document.createDocumentFragment();
+        const focused = body.contains(document.activeElement) ? document.activeElement.textContent : null;
+        let focusedLink;
+        for (const row of rows) {
+            const tr = document.createElement('tr');
+            const icao = tr.insertCell();
+            const link = element('a', row.icao);
+            link.href = `/aircraft/${encodeURIComponent(row.icao)}`;
+            icao.append(link);
+            if (row.icao === focused) focusedLink = link;
+            const values = [row.external_metadata?.registration, row.external_metadata?.type_designator,
+                row.df, row.callsign, row.on_ground == null ? null : row.on_ground ? 'Ground' : 'Airborne',
+                row.latitude, row.longitude, row.altitude, row.selected_altitude, row.speed, row.track,
+                row.vertical_rate, new Date(row.last_seen * 1000).toISOString().replace(/\.\d{3}Z$/, '+00:00'),
+                row.receiver_id, row.latest_raw_frame,
+                row.receiver_metadata?.length ? JSON.stringify(row.receiver_metadata) : null];
+            for (const item of values) {
+                tr.insertCell().textContent = item == null || item === '' ? '—'
+                    : typeof item === 'number' ? Number(item.toFixed(5)).toString() : item;
+            }
+            fragment.append(tr);
+        }
+        if (!rows.length) {
+            const tr = document.createElement('tr');
+            const cell = tr.insertCell();
+            cell.colSpan = body.closest('table').tHead.rows[0].cells.length;
+            cell.textContent = aircraft.length ? 'No matching aircraft.' : 'No current aircraft.';
+            fragment.append(tr);
+        }
+        body.replaceChildren(fragment);
+        focusedLink?.focus({preventScroll: true});
+    }
+
+    for (const button of sortButtons) {
+        button.addEventListener('click', () => {
+            ascending = sortKey === button.dataset.sort ? !ascending : button.dataset.sort === 'icao';
+            sortKey = button.dataset.sort;
+            for (const current of sortButtons) {
+                const heading = current.closest('th');
+                const selected = current === button;
+                if (selected) heading.setAttribute('aria-sort', ascending ? 'ascending' : 'descending');
+                else heading.removeAttribute('aria-sort');
+                current.querySelector('span').textContent = selected ? (ascending ? ' ▲' : ' ▼') : '';
+            }
+            updateTable();
+        });
+    }
+    search.disabled = false;
+    search.addEventListener('input', updateTable);
+    if (search.value) updateTable();
+
+    function updateStats(stats) {
+        document.getElementById('kpi-active').textContent = stats.aircraft_count;
+        document.getElementById('kpi-positioned').textContent = stats.positioned_aircraft_count;
+        document.getElementById('kpi-msg').textContent = stats.messages_per_second.toFixed(1);
+        document.getElementById('rate-window').textContent = `(${stats.message_rate_window_seconds} s)`;
+        document.getElementById('kpi-recv').textContent = `${stats.receivers_online} / ${stats.receiver_count}`;
+        const cards = stats.receivers.map(receiver => {
+            const card = document.createElement('div');
+            card.className = receiver.connected ? 'receiver online' : 'receiver offline';
+            card.append(element('strong', receiver.receiver_id),
+                element('span', receiver.connected ? 'Online' : 'Offline (disconnected)'),
+                element('span', `${receiver.messages_per_second.toFixed(1)} frames/s`));
+            return card;
+        });
+        document.getElementById('receivers').replaceChildren(
+            ...(cards.length ? cards : [element('p', 'No receivers configured.')]));
+    }
+
+    const nonnegative = number => Number.isFinite(number) && number >= 0;
+    const count = number => Number.isSafeInteger(number) && number >= 0;
+    const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+    const text = value => value == null || typeof value === 'string';
+
+    function validStats(stats) {
+        return object(stats) && count(stats.aircraft_count) && count(stats.positioned_aircraft_count) &&
+            stats.positioned_aircraft_count <= stats.aircraft_count && count(stats.receiver_count) &&
+            count(stats.receivers_online) && stats.receivers_online <= stats.receiver_count &&
+            nonnegative(stats.messages_per_second) && stats.message_rate_window_seconds > 0 &&
+            Number.isFinite(stats.message_rate_window_seconds) && Array.isArray(stats.receivers) &&
+            stats.receivers.length === stats.receiver_count && stats.receivers.every(receiver =>
+                object(receiver) && typeof receiver.receiver_id === 'string' &&
+                typeof receiver.connected === 'boolean' && nonnegative(receiver.messages_per_second));
+    }
+
+    function validAircraft(rows) {
+        return Array.isArray(rows) && rows.every(row => object(row) && typeof row.icao === 'string' &&
+            /^[0-9a-f]{6}$/i.test(row.icao) && Number.isFinite(row.last_seen) &&
+            Number.isFinite(new Date(row.last_seen * 1000).getTime()) &&
+            [row.callsign, row.receiver_id, row.latest_raw_frame].every(text) &&
+            (row.on_ground == null || typeof row.on_ground === 'boolean') &&
+            ['latitude', 'longitude', 'df', 'altitude', 'selected_altitude', 'speed', 'track', 'vertical_rate',
+                'position_age_seconds'].every(key => row[key] === null || Number.isFinite(row[key])) &&
+            Array.isArray(row.receiver_metadata) && row.receiver_metadata.every(item => typeof item === 'string') &&
+            object(row.external_metadata) && text(row.external_metadata.registration) &&
+            text(row.external_metadata.type_designator));
+    }
+
+    async function getJSON(path, signal) {
+        const response = await fetch(path, {cache: 'no-store', signal});
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+    }
+
     async function refresh() {
+        const startedAt = performance.now();
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 4500);
         try {
-            const response = await fetch('/', {cache: 'no-store', signal: AbortSignal.timeout(10000)});
-            if (!response.ok) throw new Error('Refresh failed');
-            const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
-            const data = JSON.parse(doc.getElementById('map-data').textContent);
-            document.querySelector('tbody').replaceWith(doc.querySelector('tbody'));
-            document.getElementById('receiver-status').textContent = doc.getElementById('receiver-status').textContent;
+            const results = await Promise.allSettled([
+                getJSON('/api/aircraft', controller.signal), getJSON('/api/stats', controller.signal),
+            ]);
+            const [rows, stats] = results.map(result => result.value);
+            if (!validAircraft(rows) || !validStats(stats)) throw new Error('Invalid snapshot');
+            aircraft = rows;
             sampledAt = performance.now();
-            updateMap(data.aircraft);
-            document.getElementById('refresh-status').textContent = '';
+            updateMap(aircraft);
+            updateTable();
+            updateStats(stats);
+            if (status.textContent) status.textContent = '';
         } catch (error) {
-            document.getElementById('refresh-status').textContent = 'Refresh failed; displayed observations may be stale. Retrying.';
+            if (!status.textContent) status.textContent = 'Refresh failed; displayed data may be stale. Retrying.';
         } finally {
-            setTimeout(refresh, 5000);
+            clearTimeout(timeout);
+            setTimeout(refresh, Math.max(0, refreshInterval - (performance.now() - startedAt)));
         }
     }
-    setTimeout(refresh, 5000);
+    setTimeout(refresh, refreshInterval);
 })();

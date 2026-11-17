@@ -5,6 +5,8 @@ import zipfile
 
 from .config import Config
 from .input import receive
+from .laboratory import Laboratory
+from .message_rate import MessageRate
 from .state import AircraftStore
 from .web import make_server
 from .metadata import LocalAircraftMetadata
@@ -23,20 +25,26 @@ def main():
             logging.warning("Aircraft metadata unavailable: %s", exc)
     stop = threading.Event()
     connections = {receiver.receiver_id: threading.Event() for receiver in config.receivers}
+    # Global message‑rate collector used by the stats endpoint.
+    msg_rate = MessageRate()
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda *_: stop.set())
 
     server = make_server((config.web_host, config.web_port), store,
                          "", lambda: False, metadata, config.map_center,
-                         receiver_status=lambda: {key: event.is_set() for key, event in connections.items()})
+                         receiver_status=lambda: {key: event.is_set() for key, event in connections.items()},
+                         message_rate=msg_rate)
     web = threading.Thread(target=server.serve_forever, daemon=True)
+    lab = (Laboratory(config.lab_db_path, config.receivers, config.lab_queue_capacity)
+           if config.lab_db_path else None)
     receivers = []
     for receiver_config in config.receivers:
         connected = connections[receiver_config.receiver_id]
         worker = threading.Thread(
             target=receive,
             args=(receiver_config, store.update, stop,
-                  lambda value, event=connected: event.set() if value else event.clear()),
+                  lambda value, event=connected: event.set() if value else event.clear(),
+                  msg_rate, lab),
             name=f"receiver-{receiver_config.receiver_id}", daemon=True,
         )
         receivers.append(worker)
@@ -56,6 +64,8 @@ def main():
         web.join(timeout=2)
         for worker in receivers:
             worker.join(timeout=6)
+        if lab is not None:
+            lab.close()
 
 
 if __name__ == "__main__":

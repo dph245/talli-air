@@ -19,6 +19,10 @@ services:
       MAP_LAT: ${MAP_LAT:-51}
       MAP_LON: ${MAP_LON:-10}
       AIRCRAFT_METADATA_PATH: ${AIRCRAFT_METADATA_PATH-/app/data/aircraft-metadata.zip}
+      LAB_DB_PATH: ${LAB_DB_PATH-/var/lib/airscope/laboratory.sqlite3}
+      LAB_QUEUE_CAPACITY: ${LAB_QUEUE_CAPACITY:-8192}
+    volumes:
+      - airscope-laboratory:/var/lib/airscope
     init: true
     read_only: true
     cap_drop:
@@ -30,3 +34,5 @@ services:
       options:
         max-size: "10m"
         max-file: "2"
+volumes:
+  airscope-laboratory:

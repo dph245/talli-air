@@ -7,6 +7,7 @@ import pytest
 
 from talli_flug.config import Config
 from talli_flug.input import ReceiverConfig, receive
+from talli_flug.message_rate import MessageRate
 from talli_flug.state import Aircraft, AircraftStore
 from talli_flug.metadata import AircraftMetadata, LocalAircraftMetadata
 from talli_flug.web import make_server, render
@@ -16,6 +17,7 @@ SAMPLE = b"*8D440DA5F82300030049B8930905;FE3418B8;06;057A;\r\n"
 
 def test_tcp_reconnect_and_web():
     store = AircraftStore()
+    rates = MessageRate(time_fn=lambda: 0)
     stop = threading.Event()
     enough = threading.Event()
     received = []
@@ -42,7 +44,7 @@ def test_tcp_reconnect_and_web():
         sender = threading.Thread(target=send, daemon=True)
         reader = threading.Thread(target=receive, args=(
             ReceiverConfig("test-rx", "127.0.0.1", listener.getsockname()[1], 0.01, protocol="avr"),
-            consume, stop, states.append), daemon=True)
+            consume, stop, states.append, rates), daemon=True)
         sender.start()
         reader.start()
         try:
@@ -60,7 +62,7 @@ def test_tcp_reconnect_and_web():
         "name": "Test metadata", "url": "https://example.com", "license": "Test license",
         "license_url": "https://example.com/license", "revision": "test", "downloaded_at": "2026-10-06",
     })
-    server = make_server(("127.0.0.1", 0), store, "test-rx", lambda: False, metadata)
+    server = make_server(("127.0.0.1", 0), store, "test-rx", lambda: False, metadata, message_rate=rates)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     base = f"http://127.0.0.1:{server.server_port}"
@@ -82,6 +84,12 @@ def test_tcp_reconnect_and_web():
             assert row["receiver_metadata"] == ["FE3418B8", "06", "057A"]
             assert row["external_metadata"]["registration"] == "OE-IDS"
             assert "registration" not in row["field_observations"]
+            assert row["icao"] == "440DA5"
+            assert isinstance(row["last_seen"], (float, int))
+            assert row["latitude"] is None and row["longitude"] is None
+        with urlopen(base + "/api/stats") as response:
+            assert json.load(response)["receivers"] == [
+                {"receiver_id": "test-rx", "connected": False, "messages_per_second": 0.2}]
         with urlopen(base + "/healthz") as response:
             assert response.read() == b"ok\n"
         with urlopen(base + "/aircraft/440DA5") as response:

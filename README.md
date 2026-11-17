@@ -270,6 +270,18 @@ Optional real-browser map regression (requires Playwright and Chromium):
 orientation, removal, popup escaping, fallback center, viewport persistence, and
 refresh failure/recovery. Map tiles are intercepted to avoid test tile traffic.
 
+### 1090 MHz measurement storage
+
+Set `LAB_DB_PATH` to a SQLite file in a writable directory to enable recording.
+Compose defaults to `/var/lib/airscope/laboratory.sqlite3` on a named volume;
+set `LAB_DB_PATH` to an empty string to disable it. Optional `RECEIVERS` fields
+are `latitude` and `longitude` (together), `terrain_height_m`,
+`antenna_height_agl_m`, and `chain_label`.
+
+`LAB_QUEUE_CAPACITY` sets the bounded frame queue (default 8192). A background
+writer stores minute aggregates, not raw frames. See
+[measurement semantics, retention, and migration](docs/laboratory.md).
+
 Python 3.13 is used by Docker. To run locally:
 
 ```sh

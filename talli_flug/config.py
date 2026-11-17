@@ -30,6 +30,8 @@ class Config:
     surface_ref: tuple[float, float] | None
     aircraft_metadata_path: str = str(DEFAULT_DATABASE)
     map_center: tuple[float, float] = (51.0, 10.0)
+    lab_db_path: str = ""
+    lab_queue_capacity: int = 8192
 
     @classmethod
     def from_env(cls):
@@ -48,7 +50,10 @@ class Config:
                         "protocol": os.environ.get("RECEIVER_PROTOCOL", "beast")}]
         receivers = []
         for entry in entries:
-            if not isinstance(entry, dict) or set(entry) - {"receiver_id", "host", "port", "protocol"}:
+            if not isinstance(entry, dict) or set(entry) - {
+                "receiver_id", "host", "port", "protocol", "latitude", "longitude",
+                "terrain_height_m", "antenna_height_agl_m", "chain_label",
+            }:
                 raise ValueError("Invalid RECEIVERS entry")
             if not {"receiver_id", "host"} <= set(entry):
                 raise ValueError("Every receiver needs an explicit receiver_id and host")
@@ -68,10 +73,16 @@ class Config:
                       float(os.environ.get("MAP_LON", "10")))
         if not (-90 <= map_center[0] <= 90 and -180 <= map_center[1] <= 180):
             raise ValueError("Invalid map center coordinates")
+        lab_path = os.environ.get("LAB_DB_PATH", "")
+        lab_queue_capacity = int(os.environ.get("LAB_QUEUE_CAPACITY", "8192")) if lab_path else 8192
+        if lab_queue_capacity < 1:
+            raise ValueError("LAB_QUEUE_CAPACITY must be positive")
         return cls(
             tuple(receivers),
             positive("AIRCRAFT_TTL_SECONDS", "60"),
             os.environ.get("WEB_HOST", "0.0.0.0"), port("WEB_PORT", "8080"), ref,
             os.environ.get("AIRCRAFT_METADATA_PATH", str(DEFAULT_DATABASE)),
             map_center,
+            lab_path,
+            lab_queue_capacity,
         )

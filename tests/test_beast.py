@@ -186,5 +186,6 @@ def test_idle_connection_reconnects():
 def test_multiple_receiver_status_html():
     from talli_flug.web import render
     html = render([], '', False, receiver_status={'<roof>': True, 'shed': False})
-    assert '&lt;roof&gt;: connected; shed: disconnected; retrying' in html
+    assert '<strong>&lt;roof&gt;</strong><span>Online</span>' in html
+    assert '<strong>shed</strong><span>Offline (disconnected)</span>' in html
     assert '<roof>' not in html

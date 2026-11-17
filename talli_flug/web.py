@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import math
 import re
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -35,15 +36,46 @@ def metadata_notice(source: dict | None) -> str:
             'These database records are not receiver observations and may be outdated.</p>')
 
 
+def valid_coordinate(value, limit):
+    return type(value) in (int, float) and math.isfinite(value) and abs(value) <= limit
+
+
+def dashboard_stats(rows, statuses, message_rate=None):
+    rates = message_rate.snapshot() if message_rate is not None else {}
+    return {
+        "aircraft_count": len(rows),
+        "positioned_aircraft_count": sum(
+            valid_coordinate(row.get("latitude"), 90) and valid_coordinate(row.get("longitude"), 180)
+            for row in rows),
+        "receiver_count": len(statuses),
+        "receivers_online": sum(bool(online) for online in statuses.values()),
+        "message_rate_window_seconds": message_rate.window if message_rate is not None else 10.0,
+        "messages_per_second": sum(rates.values(), 0.0),
+        "receivers": [{"receiver_id": name, "connected": bool(online),
+                       "messages_per_second": rates.get(name, 0.0)} for name, online in statuses.items()],
+    }
+
+
 def render(rows: list[dict], receiver_id: str, connected: bool, metadata_source=None,
-           map_center=(51.0, 10.0), receiver_status=None) -> str:
-    statuses = receiver_status if receiver_status is not None else {receiver_id: connected}
-    status_text = "; ".join(f"{escape(key)}: {'connected' if value else 'disconnected; retrying'}"
-                            for key, value in statuses.items())
+           map_center=(51.0, 10.0), receiver_status=None, message_rate=None) -> str:
+    """Render an initial snapshot, also usable without JavaScript."""
+    statuses = receiver_status if receiver_status is not None else ({receiver_id: connected} if receiver_id else {})
+    stats = dashboard_stats(rows, statuses, message_rate)
     map_data = json.dumps({"center": map_center, "aircraft": [
-        {key: row.get(key) for key in ("icao", "callsign", "latitude", "longitude", "altitude",
-                                     "speed", "track", "vertical_rate", "position_age_seconds")}
+        {**{key: row.get(key) for key in ("icao", "callsign", "latitude", "longitude", "altitude",
+                                        "speed", "track", "vertical_rate", "position_age_seconds",
+                                        "df", "on_ground", "selected_altitude", "last_seen", "receiver_id",
+                                        "latest_raw_frame", "receiver_metadata")},
+         "external_metadata": {key: row.get("external_metadata", {}).get(key)
+                               for key in ("registration", "type_designator")}}
         for row in rows]}, allow_nan=False).replace("<", "\\u003c")
+
+    cards = []
+    for receiver in stats["receivers"]:
+        state = "online" if receiver["connected"] else "offline"
+        label = "Online" if receiver["connected"] else "Offline (disconnected)"
+        cards.append(f'<div class="receiver {state}"><strong>{cell(receiver["receiver_id"])}</strong>'
+                     f'<span>{label}</span><span>{receiver["messages_per_second"]:.1f} frames/s</span></div>')
     body = []
     for row in rows:
         ground = row["on_ground"]
@@ -62,30 +94,84 @@ def render(rows: list[dict], receiver_id: str, connected: bool, metadata_source=
     headings = ["ICAO", "Registration", "Type", "Latest DF", "Callsign", "State", "Latitude", "Longitude",
                 "Baro altitude (ft)", "Selected altitude (ft)", "Ground speed (kt)", "Track (°)",
                 "Vertical rate (ft/min)", "Last seen (UTC)", "Latest receiver", "Latest raw frame", "Latest metadata"]
+    sort_keys = {"ICAO": "icao", "Baro altitude (ft)": "altitude", "Last seen (UTC)": "last_seen"}
+    header_cells = []
+    for heading in headings:
+        key = sort_keys.get(heading)
+        if key:
+            selected = ' aria-sort="ascending"' if key == "icao" else ''
+            indicator = ' ▲' if key == "icao" else ''
+            header_cells.append(f'<th scope="col"{selected}><button type="button" data-sort="{key}">'
+                                f'{heading}<span aria-hidden="true">{indicator}</span></button></th>')
+        else:
+            header_cells.append(f'<th scope="col">{heading}</th>')
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<noscript><meta http-equiv="refresh" content="5"></noscript><title>Talli-Flug</title>
+<title>Talli-Flug · AirScope</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <script defer src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script defer src="/static/aircraft.js"></script>
-<style>body {{font: 14px system-ui, sans-serif; margin: 24px; color: #222; background: white}}
-table {{border-collapse: collapse}} th, td {{padding: 6px 10px; border: 1px solid #bbb; text-align: left; white-space: nowrap}}
-.table {{overflow-x: auto}} h1 {{font-size: 24px}}
-#map {{height: 280px; max-width: 900px; margin: 16px 0; background: #eee}}
-.aircraft-icon svg {{display: block; width: 24px; height: 24px}}
+<style>
+html {{color-scheme:dark;}}
+body {{font:14px system-ui,sans-serif; margin:0; color:#e4ebf5; background:#10151d;}}
+main {{max-width:100rem; margin:auto; padding:clamp(.75rem,2vw,1.75rem);}}
+h1, h2, p {{margin:0;}}
+h1 {{font-size:clamp(1.4rem,4vw,2rem);}}
+h2 {{font-size:1.1rem;}}
+section {{margin-block:1rem;}}
+.muted {{color:#b3c0d2; margin-block:.45rem;}}
+a, .leaflet-container .leaflet-popup-content a {{color:#8bd7ff;}}
+table {{border-collapse:collapse; width:100%;}}
+th, td {{padding:.5rem .65rem; border-bottom:1px solid #303e50; white-space:nowrap; text-align:left;}}
+th {{background:#243246;}}
+tbody tr:nth-child(even) {{background:#1c2838;}}
+.table {{overflow-x:auto; border:1px solid #303e50; border-radius:.5rem;}}
+#map {{height:clamp(400px,60vh,740px); width:100%; border-radius:.5rem; background:#1a2534; color:#e4ebf5;}}
+.leaflet-popup-content-wrapper, .leaflet-popup-tip {{background:#1a2534; color:#e4ebf5;}}
+.aircraft-icon svg {{display:block;width:24px;height:24px;}}
+#kpi, #receivers {{display:grid; gap:.65rem; margin-block:.65rem;}}
+#kpi {{grid-template-columns:repeat(4,minmax(0,1fr));}}
+#receivers {{grid-template-columns:repeat(auto-fill,minmax(min(100%,11rem),1fr));}}
+.kpi, .receiver {{background:#1a2534; padding:.7rem .85rem; border:1px solid #303e50; border-radius:.5rem;}}
+.kpi h2 {{font-size:.85rem; color:#b3c0d2;}}
+.kpi p {{margin-top:.2rem; font-size:1.45rem; font-weight:650; font-variant-numeric:tabular-nums; color:#8bd7ff;}}
+.receiver {{display:grid; gap:.2rem; overflow-wrap:anywhere; border-inline-start:3px solid #f4ad91;}}
+.receiver.online {{border-inline-start-color:#7cdeb4;}}
+#refresh-status {{color:#ffbf9f; min-height:1.4em;}}
+.search {{display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; margin-block:.6rem;}}
+#search-box {{box-sizing:border-box; width:min(100%,24rem); padding:.5rem; background:#1a2534;
+    color:inherit; border:1px solid #65768d; border-radius:.35rem; font:inherit;}}
+th button {{color:inherit; background:none; border:0; padding:0; cursor:pointer; font:inherit;}}
+:focus-visible {{outline:2px solid #8bd7ff; outline-offset:2px;}}
+@media (max-width:640px) {{
+    #kpi {{grid-template-columns:repeat(2,minmax(0,1fr));}}
+    #map {{height:clamp(250px,48vh,420px);}}
+}}
 </style></head>
-<body><h1>Talli-Flug</h1><p id="receiver-status">Receivers: {status_text}.</p>
-<p>Refreshes every 5 seconds. — means unknown. Aircraft state combines observations from multiple frames;
-individual values may be older than Last seen. Latest DF, receiver, raw frame, and metadata refer only to the latest accepted frame.</p>
-<p>Registration and Type are external database metadata. Select an ICAO address for aircraft metadata, air data, and sources.</p>
-<div id="map" aria-label="Current aircraft positions">Map requires JavaScript and Leaflet.</div>
-<p>Map positions may be older than Last seen; select an aircraft for its position age. Markers without a known track are circles.</p>
-<p id="refresh-status" role="status"></p>
+<body><main><header><h1>AirScope · Talli-Flug</h1><p class="muted">ADS-B monitoring · Updates every 5 seconds</p>
+<p id="refresh-status" role="status"></p><noscript>Live updates require JavaScript.</noscript></header>
+<section id="kpi" aria-label="Live statistics">
+  <div class="kpi"><h2>Active aircraft</h2><p id="kpi-active">{stats['aircraft_count']}</p></div>
+  <div class="kpi"><h2>Aircraft with position</h2><p id="kpi-positioned">{stats['positioned_aircraft_count']}</p></div>
+  <div class="kpi"><h2>Frames/s <span id="rate-window">({stats['message_rate_window_seconds']:g} s)</span></h2><p id="kpi-msg">{stats['messages_per_second']:.1f}</p></div>
+  <div class="kpi"><h2>Receivers online / total</h2><p id="kpi-recv">{stats['receivers_online']} / {stats['receiver_count']}</p></div>
+</section>
+<section aria-labelledby="receivers-heading"><h2 id="receivers-heading">Receivers</h2>
+<div id="receivers">{''.join(cards) or '<p>No receivers configured.</p>'}</div></section>
+<section aria-labelledby="radar-heading"><h2 id="radar-heading">Live radar</h2>
+<p class="muted">Map positions may be older than Last seen; select an aircraft for its position age. Markers without a known track are circles.</p>
+<div id="map" aria-label="Current aircraft positions">Map requires JavaScript and Leaflet.</div></section>
 <script id="map-data" type="application/json">{map_data}</script>
-<div class="table"><table><thead><tr>{''.join(f'<th scope="col">{escape(h)}</th>' for h in headings)}</tr></thead>
-<tbody>{''.join(body)}</tbody></table></div>{metadata_notice(metadata_source)}</body></html>"""
+<section aria-labelledby="aircraft-heading"><h2 id="aircraft-heading">Aircraft</h2>
+<p class="muted">— means unknown. Aircraft state combines observations from multiple frames;
+individual values may be older than Last seen. Latest DF, receiver, raw frame, and metadata refer only to the latest accepted frame.</p>
+<p class="muted">Registration and Type are external database metadata. Select an ICAO address for aircraft metadata, air data, and sources.</p>
+<label class="search" for="search-box">Search aircraft <input type="search" id="search-box" placeholder="ICAO, callsign or registration" disabled></label>
+<div class="table" role="region" aria-label="Aircraft table" tabindex="0">
+<table><thead><tr>{''.join(header_cells)}</tr></thead>
+<tbody id="aircraft-rows">{''.join(body)}</tbody></table></div></section>{metadata_notice(metadata_source)}</main></body></html>"""
 
 
 def utc(timestamp):
@@ -157,24 +243,40 @@ wind below 1 kt has no reported direction.</p><div class="table">{''.join(derive
 
 def make_server(address: tuple[str, int], store: AircraftStore, receiver_id: str,
                 connected, metadata: MetadataLookup | None = None,
-                map_center=(51.0, 10.0), receiver_status=None) -> ThreadingHTTPServer:
+                map_center=(51.0, 10.0), receiver_status=None,
+                message_rate=None) -> ThreadingHTTPServer:
+    """Create the HTTP server.
+
+    ``message_rate`` is an optional :class:`MessageRate` instance used to
+    populate the ``/api/stats`` endpoint.  If ``None`` the endpoint returns a
+    minimal structure with zero rates.
+    """
     provider = metadata if metadata is not None else LocalAircraftMetadata()
 
     def snapshot():
         return enrich_rows(store.snapshot(), provider)
 
+    def statuses():
+        if receiver_status is not None:
+            return receiver_status()
+        return {receiver_id: connected()} if receiver_id else {}
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             path = urlsplit(self.path).path
             if path == "/":
-                payload = render(snapshot(), receiver_id, connected(), provider.source, map_center,
-                                 receiver_status() if receiver_status else None).encode()
+                payload = render(snapshot(), receiver_id, False, provider.source, map_center,
+                                 statuses(), message_rate).encode()
                 content_type = "text/html; charset=utf-8"
             elif path == "/static/aircraft.js":
                 payload = (Path(__file__).parent / "static" / "aircraft.js").read_bytes()
                 content_type = "text/javascript; charset=utf-8"
             elif path == "/api/aircraft":
                 payload = json.dumps(snapshot(), allow_nan=False).encode()
+                content_type = "application/json"
+            elif path == "/api/stats":
+                payload = json.dumps(dashboard_stats(store.snapshot(), statuses(), message_rate),
+                                     allow_nan=False).encode()
                 content_type = "application/json"
             elif re.fullmatch(r"/aircraft/[0-9A-Fa-f]{6}", path):
                 icao = path.rsplit("/", 1)[1].upper()
